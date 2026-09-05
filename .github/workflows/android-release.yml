@@ -19,6 +19,42 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      - name: Diagnostic: Java and Gradle info
+        run: |
+          java -version || true
+          ./gradlew -v || true
+          echo "PWD: $(pwd)"
+          ls -la
+          echo "Listing top-level dirs:"; ls -la | awk '{print $9}'
+
+      - name: Detect application module
+        id: detect
+        run: |
+          # find the first module that applies com.android.application
+          APP_MODULE=$(grep -R --line-number --include="build.gradle" "com.android.application" . || true)
+          if [ -z "$APP_MODULE" ]; then
+            echo "No module with com.android.application found via build.gradle search; falling back to 'presentation' or 'app' if exists"
+            if [ -d presentation ]; then
+              APP=presentation
+            elif [ -d app ]; then
+              APP=app
+            else
+              echo "No presentation or app dirs found; printing project files"; ls -la
+              echo "APP_MODULE=app" >> $GITHUB_ENV
+              exit 0
+            fi
+            echo "Detected fallback APP_MODULE=$APP"
+            echo "APP_MODULE=$APP" >> $GITHUB_ENV
+          else
+            # APP_MODULE looks like ./presentation/build.gradle:line:content - extract path
+            FIRST_LINE=$(echo "$APP_MODULE" | head -n1)
+            FILEPATH=$(echo "$FIRST_LINE" | cut -d: -f1)
+            DIRNAME=$(dirname "$FILEPATH")
+            DIRNAME=${DIRNAME#./}
+            echo "Detected APP_MODULE=$DIRNAME"
+            echo "APP_MODULE=$DIRNAME" >> $GITHUB_ENV
+          fi
+
       - name: Install Android SDK (commandline-tools, platform-tools, build-tools, platform)
         run: |
           export ANDROID_SDK_ROOT="$HOME/Android/Sdk"
@@ -26,10 +62,8 @@ jobs:
           cd "$ANDROID_SDK_ROOT/cmdline-tools"
           curl -fSLo commandlinetools.zip https://dl.google.com/android/repository/commandlinetools-linux-9477386_latest.zip
           unzip -q commandlinetools.zip
-          # Move cmdline-tools into a 'latest' folder expected by sdkmanager
           if [ -d cmdline-tools ]; then mv cmdline-tools latest; fi
           yes | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$ANDROID_SDK_ROOT" --licenses
-          # Install common required packages; adjust android-33 / build-tools version if needed
           "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$ANDROID_SDK_ROOT" "platform-tools" "platforms;android-33" "build-tools;33.0.2"
           echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
           echo "$ANDROID_SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
@@ -44,17 +78,28 @@ jobs:
           echo "$KEYSTORE_BASE64" | base64 --decode > .github/signing/release.keystore
           ls -l .github/signing/
 
-      - name: Build Release APK
+      - name: Build Release APK (module-aware)
+        env:
+          APP_MODULE: ${{ env.APP_MODULE }}
         run: |
-          # Use the app module by default; change if your module has a different name
-          ./gradlew clean assembleRelease --no-daemon --stacktrace --info --warning-mode=all
+          set -e
+          echo "APP_MODULE=
+$APP_MODULE"
+          if [ -z "$APP_MODULE" ]; then
+            echo "No APP_MODULE detected; defaulting to 'presentation'"
+            APP_MODULE=presentation
+          fi
+          echo "Building module: $APP_MODULE"
+          ./gradlew :$APP_MODULE:clean :$APP_MODULE:assembleRelease --no-daemon --stacktrace --info --warning-mode=all
 
       - name: Find generated APK
         run: |
-          APP_MODULE=app
-          APK=$(find "$APP_MODULE/build/outputs/apk" -type f -name "*release*.apk" | head -n 1)
-          if [ -z "$APK" ]; then echo "No APK found in $APP_MODULE/build/outputs/apk"; exit 1; fi
+          APP_MODULE=${{ env.APP_MODULE }}
+          if [ -z "$APP_MODULE" ]; then APP_MODULE=presentation; fi
+          echo "Searching APK in $APP_MODULE/build/outputs/apk"
+          APK=$(find "$APP_MODULE/build/outputs/apk" -type f -name "*release*.apk" | head -n 1 || true)
           echo "Found APK: $APK"
+          if [ -z "$APK" ]; then echo "No APK found in $APP_MODULE/build/outputs/apk"; ls -R "$APP_MODULE/build" || true; exit 1; fi
           echo "APK_PATH=$APK" >> $GITHUB_ENV
 
       - name: Zipalign and sign APK
@@ -71,7 +116,6 @@ jobs:
           SIGNED=app-release-signed.apk
           "$BUILD_TOOLS_DIR/zipalign" -v -p 4 "$APK_PATH" "$ALIGNED"
           "$BUILD_TOOLS_DIR/apksigner" sign --ks .github/signing/release.keystore --ks-pass pass:$KEYSTORE_PASSWORD --key-pass pass:$KEY_PASSWORD --out "$SIGNED" "$ALIGNED"
-          # Verify signature
           "$BUILD_TOOLS_DIR/apksigner" verify "$SIGNED"
           ls -lh "$SIGNED"
 
