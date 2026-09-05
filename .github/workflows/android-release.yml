@@ -30,23 +30,18 @@ jobs:
       - name: Detect application module
         id: detect
         run: |
-          # find the first module that applies com.android.application
           APP_MODULE=$(grep -R --line-number --include="build.gradle" "com.android.application" . || true)
           if [ -z "$APP_MODULE" ]; then
-            echo "No module with com.android.application found via build.gradle search; falling back to 'presentation' or 'app' if exists"
             if [ -d presentation ]; then
               APP=presentation
             elif [ -d app ]; then
               APP=app
             else
-              echo "No presentation or app dirs found; printing project files"; ls -la
-              echo "APP_MODULE=app" >> $GITHUB_ENV
-              exit 0
+              echo "No presentation or app dirs found; defaulting to presentation"; APP=presentation
             fi
             echo "Detected fallback APP_MODULE=$APP"
             echo "APP_MODULE=$APP" >> $GITHUB_ENV
           else
-            # APP_MODULE looks like ./presentation/build.gradle:line:content - extract path
             FIRST_LINE=$(echo "$APP_MODULE" | head -n1)
             FILEPATH=$(echo "$FIRST_LINE" | cut -d: -f1)
             DIRNAME=$(dirname "$FILEPATH")
@@ -78,21 +73,32 @@ jobs:
           echo "$KEYSTORE_BASE64" | base64 --decode > .github/signing/release.keystore
           ls -l .github/signing/
 
-      - name: Build Release APK (module-aware)
+      - name: Build Release APK (module-aware, capture logs)
         env:
           APP_MODULE: ${{ env.APP_MODULE }}
         run: |
-          set -e
-          echo "APP_MODULE=
-$APP_MODULE"
+          set -o pipefail
           if [ -z "$APP_MODULE" ]; then
             echo "No APP_MODULE detected; defaulting to 'presentation'"
             APP_MODULE=presentation
           fi
           echo "Building module: $APP_MODULE"
-          ./gradlew :$APP_MODULE:clean :$APP_MODULE:assembleRelease --no-daemon --stacktrace --info --warning-mode=all
+          mkdir -p build-logs
+          ./gradlew :$APP_MODULE:clean :$APP_MODULE:assembleRelease --no-daemon --stacktrace --info --warning-mode=all 2>&1 | tee build-logs/gradle-build.log || true
+          echo "GRADLE_EXIT=$?" > build-logs/exit-code.txt || true
+          # collect problems report if present
+          if [ -f "android/build/reports/problems/problems-report.html" ]; then
+            cp android/build/reports/problems/problems-report.html build-logs/problems-report.html || true
+          fi
+
+      - name: Upload build logs for diagnostics
+        uses: actions/upload-artifact@v4
+        with:
+          name: gradle-build-logs
+          path: build-logs
 
       - name: Find generated APK
+        if: success() && steps.detect.outputs.APP_MODULE != ''
         run: |
           APP_MODULE=${{ env.APP_MODULE }}
           if [ -z "$APP_MODULE" ]; then APP_MODULE=presentation; fi
@@ -103,6 +109,7 @@ $APP_MODULE"
           echo "APK_PATH=$APK" >> $GITHUB_ENV
 
       - name: Zipalign and sign APK
+        if: success() && env.APK_PATH != ''
         env:
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
@@ -120,6 +127,7 @@ $APP_MODULE"
           ls -lh "$SIGNED"
 
       - name: Upload signed APK as artifact
+        if: success() && env.APK_PATH != ''
         uses: actions/upload-artifact@v4
         with:
           name: app-release-signed.apk
