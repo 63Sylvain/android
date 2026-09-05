@@ -47,7 +47,7 @@ jobs:
       - name: Build Release APK
         run: |
           # Use the app module by default; change if your module has a different name
-          ./gradlew clean assembleRelease --no-daemon
+          ./gradlew clean assembleRelease --no-daemon --stacktrace --info --warning-mode=all
 
       - name: Find generated APK
         run: |
