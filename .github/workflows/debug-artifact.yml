@@ -1,0 +1,20 @@
+name: Debug Upload Artifact
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  upload-debug:
+    runs-on: ubuntu-latest
+n    
+    steps:
+      - name: Create debug file
+        run: |
+          echo "artifact test: $(date -u)" > debug.txt
+          ls -la
+
+      - name: Upload debug artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-artifact
+          path: debug.txt
